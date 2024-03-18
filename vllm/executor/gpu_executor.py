@@ -51,6 +51,9 @@ class GPUExecutor(ExecutorBase):
         Worker = imported_worker.Worker
         return Worker
 
+    def register_callback(self, fn):
+        self.driver_worker.register_callback(fn)
+
     def _init_worker(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker

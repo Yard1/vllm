@@ -260,6 +260,9 @@ class RayGPUExecutor(ExecutorBase):
         # if enforce_eager is False.
         self._run_workers("warm_up_model")
 
+    def register_callback(self, fn):
+        self.driver_worker.register_callback(fn)
+
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],
                       blocks_to_swap_in: Dict[int, int],

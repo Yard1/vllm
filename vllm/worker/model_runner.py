@@ -62,6 +62,7 @@ class ModelRunner:
         self.model = None
         self.block_size = None  # Set after initial profiling.
         self.lora_manager = None
+        self.callback = None
 
         self.graph_runners: Dict[int, CUDAGraphRunner] = {}
         self.graph_memory_pool = None  # Set during graph capture.
@@ -83,6 +84,9 @@ class ModelRunner:
         # Set enforce_eager to True for Neuron backend, to avoid capturing graph
         if self.device_config.is_neuron:
             self.model_config.enforce_eager = True
+
+    def register_callback(self, fn):
+        self.callback = fn
 
     def load_model(self) -> None:
         with measure_cuda_memory() as m:
@@ -587,12 +591,16 @@ class ModelRunner:
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
+        #with _maybe_cupy_nccl():
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=kv_caches,
             input_metadata=input_metadata,
         )
+
+        if self.callback:
+            self.callback()
 
         # Sample the next token.
         output = self.model.sample(

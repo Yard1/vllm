@@ -20,32 +20,37 @@ class Logprob:
     decoded_token: Optional[str] = None
 
 
-PromptLogprobs = List[Optional[Dict[int, Logprob]]]
+class PromptLogprobs(list):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.is_decoded: bool = False
+
+
 SampleLogprobs = List[Dict[int, Logprob]]
 
 
-class SequenceStatus(enum.Enum):
+class SequenceStatus(enum.IntEnum):
     """Status of a sequence."""
-    WAITING = enum.auto()
-    RUNNING = enum.auto()
-    SWAPPED = enum.auto()
-    FINISHED_STOPPED = enum.auto()
-    FINISHED_LENGTH_CAPPED = enum.auto()
-    FINISHED_ABORTED = enum.auto()
-    FINISHED_IGNORED = enum.auto()
+    WAITING = 0
+    RUNNING = 1
+    SWAPPED = 2
+    # Sequence is finished, but not yet detokenized.
+    FINISHED_STOPPED = 3
+    # Sequence is finished and has been detokenized.
+    FINISHED_DETOKENIZATION = 4
+    FINISHED_LENGTH_CAPPED = 5
+    FINISHED_ABORTED = 6
+    FINISHED_IGNORED = 7
 
     @staticmethod
     def is_finished(status: "SequenceStatus") -> bool:
-        return status in [
-            SequenceStatus.FINISHED_STOPPED,
-            SequenceStatus.FINISHED_LENGTH_CAPPED,
-            SequenceStatus.FINISHED_ABORTED,
-            SequenceStatus.FINISHED_IGNORED,
-        ]
+        return status > 2
 
     @staticmethod
     def get_finished_reason(status: "SequenceStatus") -> Union[str, None]:
-        if status == SequenceStatus.FINISHED_STOPPED:
+        if status in (SequenceStatus.FINISHED_STOPPED,
+                      SequenceStatus.FINISHED_DETOKENIZATION):
             finish_reason = "stop"
         elif status == SequenceStatus.FINISHED_LENGTH_CAPPED:
             finish_reason = "length"

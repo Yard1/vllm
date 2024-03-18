@@ -1,5 +1,6 @@
+from functools import partial
 import time
-from typing import Dict, Iterable, List, Optional, Tuple, Type, Union
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, Type, Union
 
 from transformers import PreTrainedTokenizer
 
@@ -15,15 +16,255 @@ from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (Logprob, SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
+from vllm.sequence import (Logprob, PromptLogprobs, SamplerOutput, Sequence,
+                           SequenceGroup, SequenceGroupOutput, SequenceOutput,
+                           SequenceStatus)
 from vllm.transformers_utils.tokenizer import detokenize_incrementally
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
 from vllm.utils import Counter
+from dataclasses import dataclass
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
+
+from abc import ABC, abstractmethod
+
+
+@dataclass
+class SequenceDetokenizationPayload:
+    lora_request: Optional[LoRARequest]
+    # All token ids that have been generated for a sequence.
+    all_token_ids: List[int]
+    # Newly generated token ids for a given step.
+    new_token_ids: List[int]
+    new_logprobs: List[Dict[int, Logprob]]
+    prompt_logprobs: Optional[PromptLogprobs]
+    prev_tokens: List[str]
+    prefix_offset: int
+    read_offset: int
+    skip_special_tokens: bool = False
+    spaces_between_special_tokens: bool = True
+
+
+@dataclass
+class SequenceDetokenizationData:
+    """Data for a sequence that is needed for incremental detokenization."""
+    sequence: Sequence
+    sequence_group: SequenceGroup
+    detokenization_payload: SequenceDetokenizationPayload
+
+
+@dataclass
+class SequenceDetokenizationOutput:
+    """Data for a sequence that is needed for incremental detokenization."""
+    decoded_tokens: List[str]
+    prefix_offset: int
+    read_offset: int
+    new_output_text: str
+    decoded_logprobs: List[Dict[int, Logprob]]
+    decoded_prompt_logprobs: Optional[PromptLogprobs]
+
+
+class BaseDetokenizationFuture(ABC):
+
+    @abstractmethod
+    def resolve(self) -> List[SequenceDetokenizationOutput]:
+        ...
+
+    @abstractmethod
+    async def resolve_async(self) -> List[SequenceDetokenizationOutput]:
+        ...
+
+
+@dataclass
+class SequenceDetokenizationBatch:
+    """Data for a sequence that is needed for incremental detokenization."""
+    sequence_detokenization_data: List[SequenceDetokenizationData]
+    future: BaseDetokenizationFuture
+
+
+class DetokenizationFuture(BaseDetokenizationFuture):
+
+    def __init__(self, output: List[SequenceDetokenizationOutput]):
+        self.output = output
+
+    def resolve(self) -> List[SequenceDetokenizationOutput]:
+        return self.output
+
+    async def resolve_async(self) -> List[SequenceDetokenizationOutput]:
+        return self.output
+
+
+class BaseDetokenizer(ABC):
+
+    @abstractmethod
+    def batch_detokenize_incrementally(
+        self, payloads: List[SequenceDetokenizationPayload]
+    ) -> BaseDetokenizationFuture:
+        ...
+
+
+class Detokenizer(BaseDetokenizer):
+
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+
+    def batch_detokenize_incrementally(
+        self, payloads: List[SequenceDetokenizationPayload]
+    ) -> BaseDetokenizationFuture:
+        return DetokenizationFuture(
+            [self._detokenize_incrementally(payload) for payload in payloads])
+
+    def _detokenize_incrementally(
+        self, payload: SequenceDetokenizationPayload
+    ) -> SequenceDetokenizationOutput:
+        unseen_token_ids = payload.new_token_ids
+        unseen_logprobs = payload.new_logprobs
+
+        token_ids = payload.all_token_ids
+        token_ids = token_ids[:-len(unseen_token_ids)]
+
+        tokenizer = self.tokenizer.get_lora_tokenizer(payload.lora_request)
+        all_new_tokens = []
+        all_new_output_text = ""
+        prefix_offset = payload.prefix_offset
+        read_offset = payload.read_offset
+        prev_tokens = payload.prev_tokens
+
+        self._maybe_decode_prompt_logprobs(payload, tokenizer)
+        decoded_prompt_logprobs = payload.prompt_logprobs
+
+        for new_token_id, step_logprobs in zip(unseen_token_ids,
+                                               unseen_logprobs):
+            for logprob_token_id, sample_logprob in step_logprobs.items():
+                if logprob_token_id == new_token_id:
+                    # We'll reuse the main detokenization call below
+                    # so we don't have to detokenize it twice.
+                    continue
+                # Only decode if we hadn't decoded before
+                # and logprob_token_id is valid (can be -1
+                # in spec decoding).
+                if (sample_logprob.decoded_token is None
+                        and logprob_token_id != -1):
+                    token_ids_with_logprob_token = (token_ids +
+                                                    [logprob_token_id])
+                    _, new_text, _, _ = detokenize_incrementally(
+                        tokenizer=tokenizer,
+                        all_input_ids=token_ids_with_logprob_token,
+                        prev_tokens=prev_tokens,
+                        prefix_offset=prefix_offset,
+                        read_offset=read_offset,
+                        skip_special_tokens=payload.skip_special_tokens,
+                        spaces_between_special_tokens=payload.
+                        spaces_between_special_tokens)
+                    sample_logprob.decoded_token = new_text
+
+            token_ids.append(new_token_id)
+
+            (new_tokens, new_output_text, prefix_offset,
+             read_offset) = detokenize_incrementally(
+                 tokenizer=tokenizer,
+                 all_input_ids=token_ids,
+                 prev_tokens=prev_tokens,
+                 prefix_offset=prefix_offset,
+                 read_offset=read_offset,
+                 skip_special_tokens=payload.skip_special_tokens,
+                 spaces_between_special_tokens=payload.
+                 spaces_between_special_tokens,
+             )
+            all_new_tokens.extend(new_tokens)
+            prev_tokens = prev_tokens or []
+            prev_tokens.extend(new_tokens)
+            all_new_output_text += new_output_text
+            if new_token_id in step_logprobs:
+                step_logprobs[new_token_id].decoded_token = new_output_text
+
+        return SequenceDetokenizationOutput(
+            decoded_tokens=all_new_tokens,
+            prefix_offset=prefix_offset,
+            read_offset=read_offset,
+            new_output_text=all_new_output_text,
+            decoded_logprobs=unseen_logprobs,
+            decoded_prompt_logprobs=decoded_prompt_logprobs)
+
+    def _maybe_decode_prompt_logprobs(self,
+                                      payload: SequenceDetokenizationPayload,
+                                      tokenizer: PreTrainedTokenizer) -> None:
+        if not payload.prompt_logprobs or payload.prompt_logprobs.is_decoded:
+            return
+        for i, prompt_logprobs_for_token in enumerate(payload.prompt_logprobs):
+            if prompt_logprobs_for_token:
+                for token_id, sample_logprob in prompt_logprobs_for_token.items(
+                ):
+                    if (sample_logprob.decoded_token is None
+                            and token_id != -1):
+                        all_input_ids_with_logprob = payload.all_token_ids[:i][:-1] + [
+                            token_id
+                        ]
+                        (_, new_text, _, _) = detokenize_incrementally(
+                            tokenizer,
+                            all_input_ids=all_input_ids_with_logprob,
+                            prev_tokens=payload.prev_tokens,
+                            prefix_offset=payload.prefix_offset,
+                            read_offset=payload.read_offset,
+                            skip_special_tokens=payload.skip_special_tokens,
+                            spaces_between_special_tokens=payload.
+                            spaces_between_special_tokens,
+                        )
+                        sample_logprob.decoded_token = new_text
+        payload.prompt_logprobs.is_decoded = True
+
+
+class DelayedDetokenizationFuture(BaseDetokenizationFuture):
+
+    def __init__(self, fn: Callable[[], BaseDetokenizationFuture]):
+        self.fn = fn
+
+    def resolve(self) -> List[SequenceDetokenizationOutput]:
+        return self.fn().resolve()
+
+    async def resolve_async(self) -> List[SequenceDetokenizationOutput]:
+        return self.fn().resolve()
+
+
+class DelayedDetokenizer(BaseDetokenizer):
+
+    def __init__(self, tokenizer):
+        self.detokenizer = Detokenizer(tokenizer)
+
+    def batch_detokenize_incrementally(
+        self, payloads: List[SequenceDetokenizationPayload]
+    ) -> BaseDetokenizationFuture:
+        return DelayedDetokenizationFuture(
+            partial(self.detokenizer.batch_detokenize_incrementally, payloads))
+
+
+import ray
+
+
+class RayDetokenizationFuture(BaseDetokenizationFuture):
+
+    def __init__(self, output: ray.ObjectRef):
+        self.output = output
+
+    def resolve(self) -> List[SequenceDetokenizationOutput]:
+        return ray.get(self.output).resolve()
+
+    async def resolve_async(self) -> List[SequenceDetokenizationOutput]:
+        return (await self.output).resolve()
+
+
+class RayDetokenizer(BaseDetokenizer):
+
+    def __init__(self, tokenizer):
+        self.worker = ray.remote(Detokenizer).remote(tokenizer)
+
+    def batch_detokenize_incrementally(
+        self, payloads: List[SequenceDetokenizationPayload]
+    ) -> BaseDetokenizationFuture:
+        return RayDetokenizationFuture(
+            self.worker.batch_detokenize_incrementally.remote(payloads))
 
 
 class LLMEngine:
@@ -102,6 +343,7 @@ class LLMEngine:
         self.model_executor = executor_class(model_config, cache_config,
                                              parallel_config, scheduler_config,
                                              device_config, lora_config)
+        self.model_executor.register_callback(self._start_detokenization)
 
         # Ping the tokenizer to ensure liveness if it runs in a
         # different process.
@@ -118,6 +360,9 @@ class LLMEngine:
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
                 labels=dict(model_name=model_config.model))
             self.stat_logger.info("cache_config", self.cache_config)
+
+        self.detokenization_batch = None
+        self.prev_sequences_to_decode = None
 
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
@@ -168,6 +413,7 @@ class LLMEngine:
 
         self.tokenizer: BaseTokenizerGroup = get_tokenizer_group(
             self.parallel_config.tokenizer_pool_config, **init_kwargs)
+        self.detokenizer = Detokenizer(self.tokenizer)
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -358,13 +604,6 @@ class LLMEngine:
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
         if prompt_logprobs is not None:
-            # We can pick any sequence for the prompt.
-            seq = next(iter(seq_group.seqs_dict.values()))
-            all_token_ids = seq.get_token_ids()
-            for i, prompt_logprobs_for_token in enumerate(prompt_logprobs):
-                self._decode_logprobs(seq, seq_group.sampling_params,
-                                      prompt_logprobs_for_token,
-                                      all_token_ids[:i])
             seq_group.prompt_logprobs = prompt_logprobs
 
         # Process samples
@@ -408,7 +647,12 @@ class LLMEngine:
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
-            self._decode_sequence(seq, seq_group.sampling_params)
+            # self._decode_sequence(seq,
+            #                       seq_group.sampling_params,
+            #                       token_ids=seq.get_token_ids(),
+            #                       unseen_token_ids=[seq.get_last_token_id()],
+            #                       prefix_offset=seq.prefix_offset,
+            #                       read_offset=seq.read_offset)
             self._check_stop(seq, seq_group.sampling_params)
 
         # Non-beam search case
@@ -530,8 +774,8 @@ class LLMEngine:
                 self.scheduler.free_seq(seq)
 
     def _process_model_outputs(
-            self, output: SamplerOutput,
-            scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
+        self, output: SamplerOutput, scheduler_outputs: SchedulerOutputs
+    ) -> Dict[str, Dict[int, SequenceDetokenizationData]]:
         now = time.time()
         # Update the scheduled sequence groups with the model outputs.
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
@@ -543,25 +787,55 @@ class LLMEngine:
                 self.scheduler.mark_blocks_as_computed(seq_group)
 
         for seq_group, outputs in zip(scheduled_seq_groups, output):
+            seq_group.maybe_set_first_token_time(now)
             self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
 
-        # Create the outputs.
-        request_outputs: List[RequestOutput] = []
-        for seq_group in scheduled_seq_groups:
-            seq_group.maybe_set_first_token_time(now)
-            request_output = RequestOutput.from_seq_group(seq_group)
-            request_outputs.append(request_output)
-        for seq_group in scheduler_outputs.ignored_seq_groups:
-            request_output = RequestOutput.from_seq_group(seq_group)
-            request_outputs.append(request_output)
+        # Store sequences and corresponding sequence group that need to
+        # be decoded later.
+        # request_id -> ([(sequence, sequence_detokenization_data), ...],
+        # sequence_group)
+        sequences_to_decode: Dict[str, Dict[
+            int, SequenceDetokenizationData]] = {
+                seq_group.request_id: {
+                    seq_id: SequenceDetokenizationData(
+                        sequence=seq,
+                        sequence_group=seq_group,
+                        detokenization_payload=SequenceDetokenizationPayload(
+                            seq.lora_request,
+                            all_token_ids=seq.get_token_ids().copy(),
+                            new_token_ids=[seq.get_last_token_id()],
+                            new_logprobs=[seq.output_logprobs[-1]],
+                            prompt_logprobs=seq_group.prompt_logprobs
+                            if seq_group.prompt_logprobs and
+                            not seq_group.prompt_logprobs.is_decoded else None,
+                            prefix_offset=seq.prefix_offset,
+                            read_offset=seq.read_offset,
+                            prev_tokens=seq.tokens.copy()
+                            if seq.tokens is not None else None,
+                            skip_special_tokens=seq_group.sampling_params.
+                            skip_special_tokens,
+                            spaces_between_special_tokens=seq_group.
+                            sampling_params.spaces_between_special_tokens))
+                    for seq_id, seq in seq_group.seqs_dict.items()
+                }
+                for seq_group in scheduled_seq_groups
+            }
 
         # Log stats.
         if self.log_stats:
             self.stat_logger.log(self._get_stats(scheduler_outputs))
 
+        return sequences_to_decode
+
+    def _create_outputs(
+            self, seq_groups: List[SequenceGroup]) -> List[RequestOutput]:
+        # Create the outputs.
+        request_outputs: List[RequestOutput] = [
+            RequestOutput.from_seq_group(seq_group) for seq_group in seq_groups
+        ]
         return request_outputs
 
     def step(self) -> List[RequestOutput]:
@@ -625,7 +899,59 @@ class LLMEngine:
         else:
             output = []
 
-        return self._process_model_outputs(output, scheduler_outputs)
+        output_seq_groups = self._resolve_detokenization()
+        self.prev_sequences_to_decode = self._process_model_outputs(
+            output, scheduler_outputs)
+        return self._create_outputs(output_seq_groups +
+                                    scheduler_outputs.ignored_seq_groups)
+
+    def _start_detokenization(self) -> None:
+        # Decode and return the result
+        sequences_to_decode = self.prev_sequences_to_decode
+        if not sequences_to_decode:
+            return
+        detokenization_data: List[SequenceDetokenizationData] = []
+
+        for seq_to_detokenize in sequences_to_decode.values():
+            detokenization_data.extend(seq_to_detokenize.values())
+
+        detokenization_payloads: List[SequenceDetokenizationPayload] = [
+            detokenization_data.detokenization_payload
+            for detokenization_data in detokenization_data
+        ]
+        detokenization_future = self.detokenizer.batch_detokenize_incrementally(
+            detokenization_payloads)
+
+        self.detokenization_batch = SequenceDetokenizationBatch(
+            detokenization_data, detokenization_future)
+
+    def _resolve_detokenization(self) -> List[SequenceGroup]:
+        # Decode and return the result
+        detokenization_batch = self.detokenization_batch
+        if not detokenization_batch:
+            return []
+        decoded_seq_groups: List[SequenceGroup] = []
+        detokenization_output = detokenization_batch.future.resolve()
+        for detokenization_data_entry, detokenization_output_entry in zip(
+                detokenization_batch.sequence_detokenization_data,
+                detokenization_output):
+            seq = detokenization_data_entry.sequence
+            seq_group = detokenization_data_entry.sequence_group
+            sampling_params = seq_group.sampling_params
+            if detokenization_output_entry.decoded_prompt_logprobs:
+                seq_group.prompt_logprobs = detokenization_output_entry.decoded_prompt_logprobs
+            self._decode_sequence(seq, detokenization_output_entry)
+            for stop_str in sampling_params.stop:
+                if seq.output_text.endswith(stop_str):
+                    # Truncate the output text so that the stop string is
+                    # not included in the output.
+                    seq.output_text = seq.output_text[:-len(stop_str)]
+                    seq.status = SequenceStatus.FINISHED_DETOKENIZATION
+                    self.scheduler.free_seq(seq)
+
+            decoded_seq_groups.append(seq_group)
+
+        return decoded_seq_groups
 
     def do_log_stats(self) -> None:
         """Forced log when no requests active."""
@@ -702,50 +1028,22 @@ class LLMEngine:
             time_e2e_requests=time_e2e_requests,
         )
 
-    def _decode_logprobs(self, seq: Sequence, prms: SamplingParams,
-                         logprobs: Dict[int, Logprob],
-                         all_input_ids: List[int]) -> None:
-        if not logprobs:
-            return
-        for token_id, sample_logprob in logprobs.items():
-            if (sample_logprob.decoded_token is None and token_id != -1):
-                all_input_ids_with_logprob = all_input_ids[:-1] + [token_id]
-                (_, new_text, prefix_offset,
-                 read_offset) = detokenize_incrementally(
-                     self.get_tokenizer_for_seq(seq),
-                     all_input_ids=all_input_ids_with_logprob,
-                     prev_tokens=seq.tokens,
-                     prefix_offset=seq.prefix_offset,
-                     read_offset=seq.read_offset,
-                     skip_special_tokens=prms.skip_special_tokens,
-                     spaces_between_special_tokens=prms.
-                     spaces_between_special_tokens,
-                 )
-                sample_logprob.decoded_token = new_text
+    def _decode_sequence(
+            self, seq: Sequence,
+            detokenization_output: SequenceDetokenizationOutput) -> None:
+        """Decodes new token(s) for a sequence.
 
-    def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
-        """Decodes the new token for a sequence."""
-        all_input_ids = seq.get_token_ids()
-        self._decode_logprobs(seq, prms, seq.output_logprobs[-1],
-                              all_input_ids)
-
-        (new_tokens, new_output_text, prefix_offset,
-         read_offset) = detokenize_incrementally(
-             self.get_tokenizer_for_seq(seq),
-             all_input_ids=all_input_ids,
-             prev_tokens=seq.tokens,
-             prefix_offset=seq.prefix_offset,
-             read_offset=seq.read_offset,
-             skip_special_tokens=prms.skip_special_tokens,
-             spaces_between_special_tokens=prms.spaces_between_special_tokens,
-         )
+        Sequence logprobs will be modified in place with decoded token text.
+        """
         if seq.tokens is None:
-            seq.tokens = new_tokens
+            seq.tokens = detokenization_output.decoded_tokens
         else:
-            seq.tokens.extend(new_tokens)
-        seq.prefix_offset = prefix_offset
-        seq.read_offset = read_offset
-        seq.output_text += new_output_text
+            seq.tokens.extend(detokenization_output.decoded_tokens)
+        seq.prefix_offset = detokenization_output.prefix_offset
+        seq.read_offset = detokenization_output.read_offset
+        seq.output_text += detokenization_output.new_output_text
+        seq.output_logprobs[:-len(detokenization_output.decoded_logprobs
+                                  )] = detokenization_output.decoded_logprobs
 
     def _check_stop(self, seq: Sequence,
                     sampling_params: SamplingParams) -> None:
@@ -755,6 +1053,7 @@ class LLMEngine:
                 self._finalize_sequence(seq, sampling_params, stop_str)
                 seq.status = SequenceStatus.FINISHED_STOPPED
                 return
+
         if seq.get_last_token_id() in sampling_params.stop_token_ids:
             stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(
                 seq.get_last_token_id())

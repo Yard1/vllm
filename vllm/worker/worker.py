@@ -68,6 +68,9 @@ class Worker:
         self.cache_events = None
         self.gpu_cache = None
 
+    def register_callback(self, fn):
+        self.model_runner.register_callback(fn)
+
     def init_model(self, cupy_port: Optional[int] = None) -> None:
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
