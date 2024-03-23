@@ -86,6 +86,50 @@ function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   set(${OUT_SRCS} ${HIP_SRCS} PARENT_SCOPE)
 endfunction()
 
+
+#
+# Add a target named `triton_aot` that runs the triton aot preprocessor
+# to generate source files.
+#
+function (run_triton_aot OUT_SRCS OUT_PATH)
+  #
+  # Get AOT files
+  #
+  set(TRITON_AOT_PATH ${CMAKE_SOURCE_DIR}/triton_aot)
+  file(GLOB_RECURSE TRITON_AOT_SRC ${TRITON_AOT_PATH} *.*)
+
+  set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
+  set(ENV{TRITON_CUDA_COMPUTE_CAPABILITIES} ${VLLM_GPU_ARCHES})
+
+  execute_process(
+    COMMAND ${Python_EXECUTABLE} generate.py --kernel-path "kernels" --out-path "${CSRC_BUILD_DIR}/triton_aot/gencode" --dry-run
+    WORKING_DIRECTORY ${TRITON_AOT_PATH}
+    OUTPUT_VARIABLE TRITON_AOT_OUT_PATH
+    RESULT_VARIABLE PYTHON_ERROR_CODE
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+  if(NOT PYTHON_ERROR_CODE EQUAL 0)
+    message(FATAL_ERROR "ERROR: ${PYTHON_STDERR}")
+  endif()
+
+  string (REPLACE "\n" ";" TRITON_AOT_OUT_PATH "${TRITON_AOT_OUT_PATH}")
+  # Filter out duplicate strings
+  run_python(TRITON_AOT_OUT_PATH_FILTERED
+    "print(';'.join(set('${TRITON_AOT_OUT_PATH}'.split(';'))))"
+    "Error")
+
+  set(TMP_OUT_PATH ${CSRC_BUILD_DIR}/triton_aot)
+  add_custom_command(
+    COMMAND ${Python_EXECUTABLE} generate.py --kernel-path "kernels" --out-path "${TMP_OUT_PATH}/gencode"
+    WORKING_DIRECTORY ${TRITON_AOT_PATH}
+    OUTPUT ${TRITON_AOT_OUT_PATH_FILTERED}
+    COMMENT "Compiling triton_aot.")
+
+  set(${OUT_SRCS} ${TRITON_AOT_OUT_PATH_FILTERED} PARENT_SCOPE)
+  set(${OUT_PATH} ${TMP_OUT_PATH} PARENT_SCOPE)
+endfunction()
+
+
 #
 # Get additional GPU compiler flags from torch.
 #
@@ -283,19 +327,30 @@ endmacro()
 # INCLUDE_DIRECTORIES <dirs> - Extra include directories.
 # LINK_LIBRARIES <libraries> - Extra link libraries.
 # WITH_SOABI                 - Generate library with python SOABI suffix name.
+# WITH_TRITON_AOT            - Generate library with triton aot source files.
 #
 # Note: optimization level/debug info is set via cmake build type.
 #
 function (define_gpu_extension_target GPU_MOD_NAME)
   cmake_parse_arguments(PARSE_ARGV 1
     GPU
-    "WITH_SOABI"
+    "WITH_SOABI;WITH_TRITON_AOT"
     "DESTINATION;LANGUAGE"
     "SOURCES;ARCHITECTURES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES")
 
   # Add hipify preprocessing step when building with HIP/ROCm.
   if (GPU_LANGUAGE STREQUAL "HIP")
     hipify_sources_target(GPU_SOURCES ${GPU_MOD_NAME} "${GPU_SOURCES}")
+  endif()
+
+  if (GPU_WITH_TRITON_AOT)
+    run_triton_aot(AOT_GPU_SOURCES AOT_DIR)
+    list(APPEND GPU_SOURCES ${AOT_GPU_SOURCES})
+
+    # Treat C files as C++
+    set(AOT_GPU_SOURCES_C ${AOT_GPU_SOURCES})
+    list(FILTER AOT_GPU_SOURCES_C INCLUDE REGEX "\.c$")
+    SET_SOURCE_FILES_PROPERTIES(${AOT_GPU_SOURCES_C} PROPERTIES LANGUAGE CXX )
   endif()
 
   if (GPU_WITH_SOABI)
@@ -309,6 +364,11 @@ function (define_gpu_extension_target GPU_MOD_NAME)
   if (GPU_LANGUAGE STREQUAL "HIP")
     # Make this target dependent on the hipify preprocessor step.
     add_dependencies(${GPU_MOD_NAME} hipify${GPU_MOD_NAME})
+  endif()
+
+  if (GPU_WITH_TRITON_AOT)
+    #set_target_properties(${GPU_MOD_NAME} PROPERTIES LINKER_LANGUAGE CXX)
+    target_include_directories(${GPU_MOD_NAME} PRIVATE ${AOT_DIR})
   endif()
 
   if (GPU_ARCHITECTURES)

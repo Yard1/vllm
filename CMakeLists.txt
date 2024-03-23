@@ -251,6 +251,26 @@ else()
 endif()
 
 #
+# _triton_aot_C extension
+#
+
+set(VLLM_TRITON_AOT_EXT_SRC
+  "csrc/triton_aot/penalty.cpp"
+  "csrc/triton_aot/pybind.cpp"
+  "csrc/triton_aot/rand.cpp"
+  "csrc/triton_aot/sample.cpp")
+
+define_gpu_extension_target(
+  _triton_aot_C
+  DESTINATION vllm
+  LANGUAGE ${VLLM_GPU_LANG}
+  SOURCES ${VLLM_TRITON_AOT_EXT_SRC}
+  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  WITH_SOABI
+  WITH_TRITON_AOT)
+
+#
 # Add the `default` target which detects which extensions should be
 # built based on platform/architecture.  This is the same logic that
 # setup.py uses to select which extensions should be built and should
@@ -281,5 +301,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       (ENV{VLLM_INSTALL_PUNICA_KERNELS} OR VLLM_INSTALL_PUNICA_KERNELS))
     message(STATUS "Enabling punica extension.")
     add_dependencies(default _punica_C)
+  endif()
+
+  # Enable triton_aot if -DVLLM_RUN_TRITON_AOT=ON or
+  # VLLM_RUN_TRITON_AOT is set in the environment.
+  if ((ENV{VLLM_RUN_TRITON_AOT} OR VLLM_RUN_TRITON_AOT))
+    message(STATUS "Compiling Triton kernels ahead of time.")
+    add_dependencies(default _triton_aot_C)
   endif()
 endif()

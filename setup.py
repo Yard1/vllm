@@ -119,6 +119,9 @@ class cmake_build_ext(build_ext):
         if _install_punica():
             cmake_args += ['-DVLLM_INSTALL_PUNICA_KERNELS=ON']
 
+        if _run_triton_aot():
+            cmake_args += ['-DVLLM_RUN_TRITON_AOT=ON']
+
         #
         # Setup parallelism and build tool
         #
@@ -186,6 +189,10 @@ def _is_neuron() -> bool:
 
 def _install_punica() -> bool:
     return bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "0")))
+
+
+def _run_triton_aot() -> bool:
+    return bool(int(os.getenv("VLLM_RUN_TRITON_AOT", "1")))
 
 
 def get_hipcc_rocm_version():
@@ -325,6 +332,9 @@ if _is_cuda():
 
     if _install_punica():
         ext_modules.append(CMakeExtension(name="vllm._punica_C"))
+
+    if _run_triton_aot():
+        ext_modules.append(CMakeExtension(name="vllm._triton_aot_C"))
 
 if not _is_neuron():
     ext_modules.append(CMakeExtension(name="vllm._C"))
