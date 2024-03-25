@@ -10,18 +10,16 @@ from transformers import PretrainedConfig
 
 from vllm.config import LoRAConfig
 from vllm.lora.punica import add_lora, add_lora_slice, bgmv
-from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_gather,
-    tensor_model_parallel_all_reduce,
-    tensor_model_parallel_gather,
-)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               RowParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               MergedColumnParallelLinear)
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+    ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.parallel_utils.communication_op import (
+    tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce,
+    tensor_model_parallel_gather)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.utils import (
@@ -799,8 +797,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.device = device
 
     @property
-    def logits_as_hidden_states(self):
-        return self.base_layer.logits_as_hidden_states
+    def logits_as_input(self):
+        return self.base_layer.logits_as_input
 
     @property
     def vocab_size(self):
