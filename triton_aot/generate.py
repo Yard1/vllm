@@ -4,11 +4,13 @@ AOT Triton kernels to be compiled into the wheel. The metadata of each kernel
 is specified here as Python code.
 """
 
-import sys
-import shutil
 import argparse
+import shutil
+import sys
 from pathlib import Path
-from aot_utils.aot import CompileConfiguration, Template, compile_and_link_triton_kernel
+
+from aot_utils.aot import (CompileConfiguration, Template,
+                           compile_and_link_triton_kernel)
 
 
 def _bool_to_bang(b: bool) -> str:
@@ -38,11 +40,13 @@ def main(kernel_path: Path, out_path: Path, dry_run: bool):
                             ],
                             num_warps=num_warps,
                             grid=("n_samples", "n_best", 1),
-                            condition=
-                            (f"n_cols <= {block_size} && {_bool_to_bang(modify_greedy_probs)}modify_greedy_probs && "
-                             f"{_bool_to_bang(save_logprobs)}save_logprobs && "
-                             f"{_bool_to_bang(save_modified_probs)}save_modified_probs"
-                             ),
+                            condition=(f"n_cols <= {block_size} && "
+                                       f"{_bool_to_bang(modify_greedy_probs)}"
+                                       "modify_greedy_probs && "
+                                       f"{_bool_to_bang(save_logprobs)}"
+                                       "save_logprobs && "
+                                       f"{_bool_to_bang(save_modified_probs)}"
+                                       "save_modified_probs"),
                         )
                     ]
 

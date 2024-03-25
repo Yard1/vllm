@@ -1,9 +1,10 @@
-from typing import List, Tuple, Optional
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
-import os
-from .link import link as _link
+from typing import List, Optional, Tuple
+
 from .compile import compile as _compile
+from .link import link as _link
 
 
 @dataclass

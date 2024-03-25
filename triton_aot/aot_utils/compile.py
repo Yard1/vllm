@@ -1,3 +1,5 @@
+# ruff: noqa
+
 # Based on https://github.com/openai/triton/commit/a767ca41e189988740d35cbb9aecd873c4874a62
 
 # Copyright 2018-2020 Philippe Tillet
@@ -25,15 +27,15 @@
 import binascii
 import hashlib
 import importlib.util
-import sys
 import shutil
+import sys
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
 
 import triton
 from triton.compiler.code_generator import kernel_suffix
-from triton.compiler.make_launcher import ty_to_cpp
 from triton.compiler.compiler import get_architecture_descriptor
+from triton.compiler.make_launcher import ty_to_cpp
 
 desc = """
 Triton ahead-of-time compiler:

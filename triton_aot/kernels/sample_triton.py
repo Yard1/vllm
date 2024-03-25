@@ -125,7 +125,9 @@ def _sample_triton(
                   other=float("-inf"))
 
     if uses_random_sampling:
-        uniform_noise_start_ptr = uniform_noise_ptr + sample_idx * uniform_noise_row_stride + best_idx * uniform_noise_best_stride
+        uniform_noise_start_ptr = (uniform_noise_ptr +
+                                   sample_idx * uniform_noise_row_stride +
+                                   best_idx * uniform_noise_best_stride)
         uniform_noise = tl.load(uniform_noise_start_ptr + col_offsets,
                                 mask=col_offsets < n_cols,
                                 other=0.5)
@@ -152,7 +154,7 @@ def _sample_triton(
                             best_idx)
     tl.store(output_row_start_ptr, sampled_token)
 
-    if modify_greedy_probs:
+    if modify_greedy_probs:  # noqa
         if not uses_random_sampling:
             # Set the probability of the sampled token to 1, all other
             # tokens to zero. This is used in speculative decoding where

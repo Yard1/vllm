@@ -1,3 +1,5 @@
+# ruff: noqa
+
 # Based on https://github.com/openai/triton/commit/a767ca41e189988740d35cbb9aecd873c4874a62
 
 # Copyright 2018-2020 Philippe Tillet
@@ -22,12 +24,11 @@
 # TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+import re
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence, Union
-
-from dataclasses import dataclass
-import re
 
 
 def _exists(x):
