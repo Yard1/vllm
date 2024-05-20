@@ -31,6 +31,8 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "bfloat16": torch.bfloat16,
     "float": torch.float,
     "fp8": torch.uint8,
+    "fp8_e5m2": torch.uint8,
+    "fp8_e4m3": torch.uint8,
 }
 
 
@@ -368,22 +370,27 @@ def create_kv_caches_with_random_flash(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    assert cache_dtype != "fp8"
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
-    key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
+    key_value_cache_shape = (2, num_blocks, block_size, num_heads, head_size)
     scale = head_size**-0.5
     key_caches, value_caches = [], []
     for _ in range(num_layers):
         key_value_cache = torch.empty(size=key_value_cache_shape,
                                       dtype=torch_dtype,
                                       device=device)
-        key_value_cache.uniform_(-scale, scale)
-        key_caches.append(key_value_cache[:, 0])
-        value_caches.append(key_value_cache[:, 1])
+        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+            key_value_cache.uniform_(-scale, scale)
+        elif cache_dtype == 'fp8':
+            key_value_cache = torch.empty_like(key_value_cache, dtype=torch.float16).uniform_(-scale, scale).to(torch.float8_e5m2).view(dtype=torch_dtype)
+        else:
+            raise ValueError(
+                f"Does not support key cache of type {cache_dtype}")
+        key_caches.append(key_value_cache[0].contiguous())
+        value_caches.append(key_value_cache[1].contiguous())
     return key_caches, value_caches
 
 

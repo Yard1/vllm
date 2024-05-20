@@ -255,9 +255,10 @@ def reshape_and_cache_flash(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
+    kv_scale: float,
 ) -> None:
     vllm_cache_ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
-                                           slot_mapping, kv_cache_dtype)
+                                           slot_mapping, kv_cache_dtype, kv_scale)
 
 
 def copy_blocks(key_caches: torch.Tensor, value_caches: torch.Tensor,

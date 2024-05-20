@@ -93,8 +93,8 @@ def _which_attn_to_use(
                     "torch.float16 or torch.bfloat16.")
         return _Backend.XFORMERS
 
-    if kv_cache_dtype is not None and kv_cache_dtype.startswith("fp8"):
-        logger.info("Cannot use FlashAttention-2 backend for FP8 KV cache.")
+    if kv_cache_dtype is not None and kv_cache_dtype in ("fp8", "fp8_e4m3"):
+        logger.info("Cannot use FlashAttention-2 backend with FP8_e4m3 KV cache (FP8_e5m2 is supported).")
         return _Backend.XFORMERS
 
     if block_size % 16 != 0:

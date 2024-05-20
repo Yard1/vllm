@@ -1,5 +1,6 @@
 from typing import List, Optional, Tuple
 
+import random
 import pytest
 import torch
 from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
@@ -8,6 +9,7 @@ NUM_HEADS = [(16, 16), (32, 8), (64, 8)]
 HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16, 32]
 DTYPES = [torch.float16, torch.bfloat16]
+KV_DTYPES = ["fp8"]
 
 
 def ref_paged_attn(
@@ -62,22 +64,28 @@ def ref_paged_attn(
     return torch.cat(outputs, dim=0)
 
 
-@pytest.mark.parametrize("kv_lens", [[1328, 18, 463], [1, 54, 293, 70]])
+@pytest.mark.parametrize("kv_lens", [[1328, 18, 463]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("kv_dtype", KV_DTYPES)
+@pytest.mark.parametrize("seed", [0,1,2,3,4,5,6,7,8,9,10])
+@pytest.mark.parametrize("num_blocks", [128, 102, 103, 542, 319, 591])
 @torch.inference_mode
 def test_flash_attn_with_paged_kv(
     kv_lens: List[Tuple[int, int]],
     num_heads: Tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
+    kv_dtype: str,
     block_size: int,
+    seed, num_blocks
 ) -> None:
     torch.set_default_device("cuda")
-    torch.cuda.manual_seed_all(0)
-    num_blocks = 128
+    torch.cuda.manual_seed_all(seed)
+    random.seed(seed)
+    kv_lens = [random.randint(1, 1500) for _ in range(random.randint(1, 32))]
     num_seqs = len(kv_lens)
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]
@@ -93,6 +101,17 @@ def test_flash_attn_with_paged_kv(
                             dtype=dtype)
     value_cache = torch.randn_like(key_cache)
     kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int32)
+
+    if kv_dtype != "auto":
+        key_cache = key_cache.to(torch.float8_e5m2)
+        value_cache = value_cache.to(torch.float8_e5m2)
+        key_cache_ref = key_cache.to(query.dtype)
+        value_cache_ref = value_cache.to(query.dtype)
+        key_cache = key_cache.view(dtype=torch.uint8)
+        value_cache = value_cache.view(dtype=torch.uint8)
+
+    else:
+        key_cache_ref, value_cache_ref = key_cache, value_cache
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
@@ -112,8 +131,8 @@ def test_flash_attn_with_paged_kv(
 
     ref_output = ref_paged_attn(
         query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
+        key_cache=key_cache_ref,
+        value_cache=value_cache_ref,
         query_lens=[1] * num_seqs,
         kv_lens=kv_lens,
         block_tables=block_tables,
@@ -129,6 +148,7 @@ def test_flash_attn_with_paged_kv(
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("sliding_window", [None])
 @pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("kv_dtype", KV_DTYPES)
 @torch.inference_mode
 def test_varlen_with_paged_kv(
     seq_lens: List[Tuple[int, int]],
@@ -136,6 +156,7 @@ def test_varlen_with_paged_kv(
     head_size: int,
     sliding_window: Optional[int],
     dtype: torch.dtype,
+    kv_dtype: str,
     block_size: int,
 ) -> None:
     torch.set_default_device("cuda")
@@ -181,6 +202,18 @@ def test_varlen_with_paged_kv(
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
+
+    if kv_dtype != "auto":
+        key_cache = key_cache.to(torch.float8_e5m2)
+        value_cache = value_cache.to(torch.float8_e5m2)
+        key_cache_ref = key_cache.to(query.dtype)
+        value_cache_ref = value_cache.to(query.dtype)
+        key_cache = key_cache.view(dtype=torch.uint8)
+        value_cache = value_cache.view(dtype=torch.uint8)
+
+    else:
+        key_cache_ref, value_cache_ref = key_cache, value_cache
+
     output = flash_attn_varlen_func(
         q=query,
         k=key_cache,
@@ -197,8 +230,8 @@ def test_varlen_with_paged_kv(
 
     ref_output = ref_paged_attn(
         query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
+        key_cache=key_cache_ref,
+        value_cache=value_cache_ref,
         query_lens=query_lens,
         kv_lens=kv_lens,
         block_tables=block_tables,
