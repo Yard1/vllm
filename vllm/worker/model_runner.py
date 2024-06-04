@@ -595,7 +595,7 @@ class ModelRunner:
                 num_kv_heads=self.model_config.get_num_kv_heads(
                     self.parallel_config),
                 head_dim=self.model_config.get_head_size(),
-                page_size=16,
+                page_size=self.cache_config.block_size,
                 seq_start_loc=seq_start_loc,
                 data_type=kv_cache_dtype)
         else:

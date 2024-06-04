@@ -354,7 +354,7 @@ def get_kv_cache_torch_dtype(
                 raise ValueError(f"Invalid model dtype: {model_dtype}")
         elif cache_dtype in ["half", "bfloat16", "float"]:
             torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
-        elif cache_dtype == "fp8":
+        elif cache_dtype in ("fp8", "fp8_e5m2", "fp8_e4m3"):
             torch_dtype = torch.uint8
         else:
             raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")

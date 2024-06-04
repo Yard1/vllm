@@ -168,7 +168,10 @@ class FlashInferImpl(AttentionImpl):
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
     ) -> None:
+        assert blocksparse_params is None, ValueError(
+            "FlashAttention does not support block-sparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -179,7 +182,7 @@ class FlashInferImpl(AttentionImpl):
         if sliding_window is not None:
             raise ValueError("Sliding window is not supported in FlashInfer.")
         self.sliding_window = (-1, -1)
-        self.kv_cache_dtype = kv_cache_dtype
+        self.kv_cache_dtype = "fp8_e5m2"
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -215,6 +218,7 @@ class FlashInferImpl(AttentionImpl):
                 kv_cache[:, 1],
                 attn_metadata.slot_mapping.flatten(),
                 self.kv_cache_dtype,
+                1.0
             )
 
         if prefill_meta := attn_metadata.prefill_metadata:
@@ -242,8 +246,9 @@ class FlashInferImpl(AttentionImpl):
             assert attn_metadata.decode_metadata.decode_wrapper is not None
             query = query.contiguous(
             )  # Flashinfer requires query to be contiguous
+            kv_cache = kv_cache.view(dtype=torch.float8_e5m2) if self.kv_cache_dtype.startswith("fp8") else kv_cache
             output = attn_metadata.decode_metadata.decode_wrapper.forward(
-                query,
+                query.to(kv_cache.dtype),
                 kv_cache,
                 sm_scale=self.scale,
             )

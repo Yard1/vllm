@@ -292,6 +292,7 @@ class FlashAttentionImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping.flatten(),
                 self.kv_cache_dtype,
+                1.0
             )
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens

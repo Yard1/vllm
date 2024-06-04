@@ -126,10 +126,6 @@ def which_attn_to_use(
                 "Cannot use FlashAttention-2 backend for dtype other than "
                 "torch.float16 or torch.bfloat16.")
             selected_backend = _Backend.XFORMERS
-        elif kv_cache_dtype is not None and kv_cache_dtype.startswith("fp8"):
-            logger.info(
-                "Cannot use FlashAttention-2 backend for FP8 KV cache.")
-            selected_backend = _Backend.XFORMERS
         elif block_size % 16 != 0:
             logger.info(
                 "Cannot use FlashAttention-2 backend for block size not "
