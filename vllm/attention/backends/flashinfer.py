@@ -182,7 +182,7 @@ class FlashInferImpl(AttentionImpl):
         if sliding_window is not None:
             raise ValueError("Sliding window is not supported in FlashInfer.")
         self.sliding_window = (-1, -1)
-        self.kv_cache_dtype = "fp8_e5m2"
+        self.kv_cache_dtype = kv_cache_dtype
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
