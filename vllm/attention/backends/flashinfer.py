@@ -109,6 +109,9 @@ class FlashInferMetadata(AttentionMetadata):
                 f"Only {supported_head_sizes} are supported for head_dim,",
                 f"received {self.head_dim}.")
 
+        if self.data_type == torch.uint8:
+            self.data_type = torch.float8_e5m2
+
         # When using flashinfer, we are also creating the FlashInferMetadata,
         # which will also call post_init by default, here we want to skip the
         # post_init if it's the prefill phase.
@@ -182,6 +185,8 @@ class FlashInferImpl(AttentionImpl):
         if sliding_window is not None:
             raise ValueError("Sliding window is not supported in FlashInfer.")
         self.sliding_window = (-1, -1)
+        if kv_cache_dtype == "fp8":
+            kv_cache_dtype = "fp8_e5m2"
         self.kv_cache_dtype = kv_cache_dtype
 
         assert self.num_heads % self.num_kv_heads == 0
